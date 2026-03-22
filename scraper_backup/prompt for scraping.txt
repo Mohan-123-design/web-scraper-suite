@@ -1,0 +1,287 @@
+import pandas as pd
+import requests
+import time
+import random
+import os
+import argparse
+from bs4 import BeautifulSoup
+from multiprocessing import Process
+
+INPUT_FILE = "input.xlsx"
+OUTPUT_DIR = "output_batches"
+RAW_DIR = "raw_pages"
+SCRAPER_API_KEY = "c7IhXewJTezo8lIyq6GXQmCAnN0gOwEZ"
+
+os.makedirs(RAW_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+def log(msg):
+    print(f"[INFO] {msg}", flush=True)
+
+# ---------------- SCRAPER LOGIC ---------------- #
+
+def extract_home_type(html):
+    soup = BeautifulSoup(html, "html.parser")
+    for card in soup.select("div.home-facts-card"):
+        title = card.select_one("p.home-facts-card-title")
+        value = card.select_one("p.home-facts-card-text")
+        if title and value and title.get_text(strip=True).lower() == "home type":
+            return value.get_text(strip=True)
+    return "Not Found"
+
+def fetch_page(url):
+    params = {
+        "api_key": SCRAPER_API_KEY,
+        "url": url,
+        "render": "true",
+        "country_code": "us"
+    }
+    r = requests.get("https://api.scraperapi.com/", params=params, timeout=120)
+    r.raise_for_status()
+    return r.text
+
+# ---------------- BATCH WORKER ---------------- #
+
+def process_batch(start_row, end_row):
+    df = pd.read_excel(INPUT_FILE)
+    link_col = [c for c in df.columns if "link" in c.lower()][0]
+
+    batch_file = f"{OUTPUT_DIR}/batch_{start_row}_{end_row}.xlsx"
+
+    if os.path.exists(batch_file):
+        out_df = pd.read_excel(batch_file)
+        processed = set(out_df["Row Number"])
+        results = out_df.to_dict("records")
+        log(f"Resuming batch {start_row}-{end_row}")
+    else:
+        processed = set()
+        results = []
+
+    for idx in range(start_row - 1, min(end_row, len(df))):
+        row_num = idx + 1
+        if row_num in processed:
+            continue
+
+        url = str(df.iloc[idx][link_col]).strip()
+        log(f"[Batch {start_row}-{end_row}] Row {row_num}")
+
+        try:
+            html = fetch_page(url)
+
+            raw_file = f"page_{row_num}.html"
+            with open(os.path.join(RAW_DIR, raw_file), "w", encoding="utf-8") as f:
+                f.write(html)
+
+            home_type = extract_home_type(html)
+
+            results.append({
+                "Row Number": row_num,
+                "Link": url,
+                "Raw File": raw_file,
+                "Home Type": home_type,
+                "Status": "Success" if home_type != "Not Found" else "Home Type Not Found"
+            })
+
+        except Exception as e:
+            results.append({
+                "Row Number": row_num,
+                "Link": url,
+                "Raw File": "",
+                "Home Type": "",
+                "Status": f"Error: {e}"
+            })
+
+        pd.DataFrame(results).to_excel(batch_file, index=False)
+        time.sleep(random.uniform(2, 4))
+
+    log(f"Batch {start_row}-{end_row} completed")
+
+# ---------------- MERGE OUTPUT ---------------- #
+
+def merge_batches():
+    files = [os.path.join(OUTPUT_DIR, f) for f in os.listdir(OUTPUT_DIR) if f.endswith(".xlsx")]
+    dfs = [pd.read_excel(f) for f in files]
+    final = pd.concat(dfs).drop_duplicates("Row Number").sort_values("Row Number")
+    final.to_excel("output.xlsx", index=False)
+    log("Merged final output.xlsx")
+
+# ---------------- MAIN ---------------- #
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start", type=int)
+    parser.add_argument("--end", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--batch-index", type=int)
+    parser.add_argument("--merge", action="store_true")
+
+    args = parser.parse_args()
+
+    if args.merge:
+        merge_batches()
+        exit()
+
+    if args.start and args.end:
+        p = Process(target=process_batch, args=(args.start, args.end))
+        p.start()
+        p.join()
+
+    elif args.batch_size is not None and args.batch_index is not None:
+        start = args.batch_index * args.batch_size + 1
+        end = start + args.batch_size
+        p = Process(target=process_batch, args=(start, end))
+        p.start()
+        p.join()
+
+    else:
+        print("Invalid arguments")  
+
+the code is working , now need the update little more things, the api calling is remains same, split the process into two file as like as project structure  api call as separate , extraction of required things separate , in extraction need the update , first we only focus on home type value but now we force to get n number of column fields from the api called html output 
+
+https://www.homes.com/property/lot-117-se-texas-cir-prineville-or/shbnh9tdq86ss/
+https://www.homes.com/property/15900-sparks-dr-la-pine-or/0j3bpjjvqs1xg/
+
+before that note that we have two categoried results  one is home type and another is property type , both scraped html files and its urls link  have attached make the glance on it and make sure these are the columns have to extract is 
+Address	City	State	Zip	Realtor Name	Realtor Company	Home Price	Home Type	Bedroom	Bath	Square Footage	Land $ per acre	Source Link
+
+for each column there is individual values have to extract and update save is required 
+
+===
+for address ,city, state, zip 
+div class="property-info-address-and-media-types">
+    <div class="property-info-address">
+        <h1>
+                        <span class="property-info-address-main">
+                            1784 SE Texas Cir   (=> in Address column )
+                        </span>
+            <span class="property-info-address-citystatezip">
+                    <a class="standard-link text-only" href="/prineville-or/" title="Prineville Homes For Sale">Prineville (in city column), OR (in state column)</a> 
+                    <a class="standard-link text-only" href="/prineville-or/97754/" title="97754 Homes For Sale">97754 ( in zip code column)</a> 
+            </span>
+        </h1>
+
+
+<div class="property-info-address-and-media-types">
+    <div class="property-info-address">
+        <h1>
+                        <span class="property-info-address-main">
+                            0 NW Pinecrest Dr Unit 2 220208713 (in Address column) 
+                        </span>
+            <span class="property-info-address-citystatezip">
+                    <a class="standard-link text-only" href="/prineville-or/land-for-sale/" title="Prineville Lots For Sale">Prineville(in city), OR(in state )</a> 
+                    <a class="standard-link text-only" href="/prineville-or/97754/land-for-sale/" title="97754 Lots For Sale">97754(in zip code)</a> 
+            </span>
+        </h1>
+    </div>
+</div>
+
+make sure to fetch the correct details i have mentioned the value nearby as with brackets for the column field values for in address , city , state, zip code columns as in their nearby values so figure out with keywords, div class name, element id name etc and save in as it
+====
+for realtor name  and company 
+
+div class="agent-information-wrapper multiple-agents ">
+                        <div class="agent-information-mls-info ">
+                                    <p class="listing-agent-title">Listing Agent</p>
+                                <p class="agent-information-container">
+                                        <span>
+                                            <a class="agent-information agent-information-fullname standard-link text-only" href="/real-estate-agents/amanda-wrenn/zqnpj0y/" title="View Amanda Wrenn's real estate profile">
+                                                Amanda Wrenn  (in Realtor Name column) 
+                                            </a>
+                                        </span>
+                                </p>
+                                <p class="agent-information-container">
+
+                                            <span class="agent-information agent-information-agency-name">Knightsbridge International (in realtor company )</span> 
+
+                                            <span class="agent-information agent-information-idx-contact">Brokerage Phone: 541-312-2113</span>
+
+                                        <span class="agent-information agent-information-license-number">License #201220912</span>
+
+                                        <span class="agent-information agent-information-last-listed">Listed on: 10/02/2025</span>
+                                </p>
+                        </div>
+make sure to fetch the correct details i have mentioned the value nearby as with brackets for the column field values for in address , city , state, zip code columns as in their nearby values so figure out with keywords, div class name, element id name etc and save in as it
+========
+for Home price column
+
+<div class="property-info-price-and-icons">
+
+            <span class="property-info-price" id="price">$799,000 (in Home Price column)</span> 
+
+<div id="property-info-user-actions" class="property-info-user-actions">
+make sure to fetch the correct details i have mentioned the value nearby as with brackets for the column field values for in address , city , state, zip code columns as in their nearby values so figure out with keywords, div class name, element id name etc and save in as it
+============
+for Bedroom	Bath	Square Footage	Land $ per acre
+
+<div class="property-info-features plain-list flex">
+        <span class="property-info-feature beds">
+            <span class="property-info-feature-detail">3 (for Bedroom column)</span> 
+            <span class="feature-beds">Beds</span>
+        </span>
+        <div class="divider"></div>
+        <span class="property-info-feature">
+            <span class="property-info-feature-detail">2.5(for bathroom column)</span> 
+            <span class="feature-baths">Baths</span>
+        </span>
+        <div class="divider"></div>
+        <span class="property-info-feature sqft">
+            <span class="property-info-feature-detail">2,338 (for sq ft column)</span> 
+            <span class="feature-sqft">Sq Ft</span>
+        </span>
+        <div class="divider"></div>
+this is for home type code 
+
+<div class="property-info-features plain-list flex">
+        <span class="property-info-feature acres">
+            <span class="property-info-feature-detail">5.3</span>
+            <span class="feature-acres">Acres</span>
+        </span>
+        <div class="divider"></div>
+        <span class="property-info-feature acresoeracre">
+            <span class="property-info-feature-detail">$33,962 ( for land $ per acre column )</span> 
+            <span class="feature-priceperacre">Price per Acre</span>
+        </span>
+        <div class="divider"></div>
+        <span class="property-info-feature sqftlot">
+            <span class="property-info-feature-detail">230,868</span>
+            <span class="feature-sqftlot">Sq Ft Lot</span>
+        </span>
+        <div class="divider"></div>
+this is for property type 
+
+make sure to fetch the correct details i have mentioned the value nearby as with brackets for the column field values for in address , city , state, zip code columns as in their nearby values so figure out with keywords, div class name, element id name etc and save in as it
+======
+for Home type column
+
+<div class="category">
+                        <div class="subcategory-container">
+                            <div class="subcategory">
+                                <i class="am-icon reso-home-type-icon" aria-hidden="true"></i>
+                                <h3 class="amenity-name">Home Type</h3>
+                                    <ul class="amenities-list accordion-panel js-accordion-panel">
+                                                <li class="amenities-detail">
+                                                    Single Family (in home type column) 
+                                                </li>
+                                    </ul>
+                            </div>
+                        </div>
+make sure to fetch the correct details i have mentioned the value nearby as with brackets for the column field values for in address , city , state, zip code columns as in their nearby values so figure out with keywords, div class name, element id name etc and save in as it
+==========
+for property type column
+<div class="feature-category feature-0 ">
+                <h2 class="ldp-heading ldp-amenities-heading">Property Details</h2>
+                <div class="category">
+                        <div class="subcategory-container">
+                            <div class="subcategory">
+                                <i class="am-icon reso-home-type-icon" aria-hidden="true"></i>
+                                <h3 class="amenity-name">Property Type</h3>
+                                    <ul class="amenities-list accordion-panel js-accordion-panel">
+                                                <li class="amenities-detail">
+                                                    Land (for property type column) 
+                                                </li>
+                                    </ul>
+                            </div>
+                        </div>
+make sure to fetch the correct details i have mentioned the value nearby as with brackets for the column field values for in address , city , state, zip code columns as in their nearby values so figure out with keywords, div class name, element id name etc and save in as it
+
+for each column each values have identified their location and its full code files and its link also, make sure for fill those details in cells, for each row input link html file extracted from api and its html output is listed  and each file have to parse by all this column extracted and filled it as per detail if its not found means make it empty , proceed these all these updation and process workflow and all the necessary things and requirements here to execute 
